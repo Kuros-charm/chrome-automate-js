@@ -3,3 +3,8 @@
 3. open devtools of devtools (ctrl + shift + i again)
 4. Source -> add snippet, add core.js + demo.js
 5. Console -> type demo()
+
+# refs
+
+- https://github.com/ChromeDevTools/devtools-frontend
+- https://chromedevtools.github.io/devtools-protocol/
