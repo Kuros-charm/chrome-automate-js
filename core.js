@@ -1,7 +1,29 @@
-const isDebug = false
+const isDebug = true
 
 
 const clientCode = `
+
+const tryUntilTimeout = (tryOnce, time) => {
+   let done = false;
+   let result = null;
+   return Promise.race([
+      (async () => {
+         while (!done){
+            result = await tryOnce();
+            done = done || !!result
+            if (!done){
+               await new Promise(res => setTimeout(res, 500));
+            }
+         }
+         return result;
+      })(),
+      new Promise((_,rej) => setTimeout(() =>{
+         done = true;
+         rej('timedout');
+      }, time))
+   ])
+};
+
 
 const callCdpResult = {};
 
@@ -44,30 +66,11 @@ class ActionChain {
 
     waitElement(selector, filterFn = x=> true, insidePrevious = false) {
         this._chain((e) => {
-           
-            return new Promise((res, rej) => {
-
-                const timeout = setTimeout(() => {
-                    console.error('timedout, not found', selector, filterFn);
-                    rej();
-                }, 10*1000);
-                (async () => {
-                    while(true){
-                        const found = [...(insidePrevious ? e : document).querySelectorAll(selector)].find(filterFn);
-                        if (found){
-                            clearTimeout(timeout);
-                            res(found);
-                            break;
-                        }
-                        await new Promise(ress=> setTimeout(ress,500))
-                    }
-
-                })()
-                
-          
-               
-            })
-        });
+            return tryUntilTimeout(
+                () =>  [...(insidePrevious ? e : document).querySelectorAll(selector)].find(filterFn),
+            10*1000)
+         })
+   
         return this
     }
     click(){
@@ -175,15 +178,15 @@ const snippetContext = {
 
 
 const defaultEvauateParams = {
-    silent: false,
-    includeCommandLineAPI: true,
-    returnByValue: false,
-    generatePreview: false,
-    awaitPromise: true
+   silent: false,
+   includeCommandLineAPI: true,
+   returnByValue: false,
+   generatePreview: false,
+   awaitPromise: true
 }
 
 
-const debug = isDebug ? console.debug : () => { };
+const debug = isDebug ? console.debug: () =>{};
 
 
 
@@ -191,29 +194,35 @@ const PC = await import('./devtools-frontend/front_end/core/protocol_client/prot
 
 const test = PC.InspectorBackend.test
 
-function sendMessage(method, params) {
-    return new Promise((resolve, reject) => {
-        test.sendRawMessage(method, params, (err, ...results) => {
-            if (err) {
-                return reject(err);
-            }
-            return resolve(results);
-        });
-    })
-};
-
-const evaluate = async (expression, options = {}) => {
-    const r = await sendMessage('Runtime.evaluate', { ...defaultEvauateParams, ...options, expression });
-    const [{ exceptionDetails, result }] = r
-    if (exceptionDetails) {
-        console.error(`when evaluate`, exceptionDetails, '\n', `${expression}`)
+function sendMessage(method, params){
+  return new Promise((resolve, reject) => {
+  test.sendRawMessage(method, params, (err, ...results) => {
+    if (err) {
+      return reject(err);
     }
-    return r;
+    return resolve(results);
+  });
+})};
 
+const getCurrentContextId = () => {
+   if (currentContextId && executionContexts.find(x=> x.id === currentContextId)){
+      return currentContextId;
+   }
+   return undefined;
 }
 
-function setUpClient(contextId) {
-    return evaluate(clientCode, { replMode: true, contextId })
+const evaluate = async (expression, options = {}) => {
+   const r = await sendMessage('Runtime.evaluate', {contextId:getCurrentContextId() , ...defaultEvauateParams, ...options, expression});
+   const [{exceptionDetails, result}]  = r
+   if (exceptionDetails){
+      console.error( `when evaluate`,exceptionDetails ,'\n',`${expression}`)
+   }
+   return r;
+  
+}
+
+function setUpClient(contextId){
+   return evaluate(clientCode, { replMode: true, contextId})
 }
 
 
@@ -222,162 +231,170 @@ const bindingName = 'callCdp';
 let messageHandlers = [];
 const methodWhitelist = ['Runtime', 'Page', 'Network'];
 const methodBlacklist = [
-    'Runtime.consoleAPICalled',
-    'ExtraInfo',
-    'Network.dataReceived',
-    'Network.webSocketFrameReceived',
-    'Network.resourceChangedPriority'
+   'Runtime.consoleAPICalled',
+   'ExtraInfo',
+   'Network.dataReceived',
+   'Network.webSocketFrameReceived',
+   'Network.resourceChangedPriority'
 ]
 
 
 test.onMessageReceived = (x) => {
-    if (methodWhitelist.find(method => x.method?.includes(method)
-        && !methodBlacklist.find(method => x.method?.includes(method)))) {
-        debug('onMessageReceived', x);
-        messageHandlers = messageHandlers.filter(hdr => {
-            try {
-                return !hdr(x);
-            } catch (e) {
-                console.error('when handle messageHandlers', hdr, x);
-            }
-            return false;
-        })
-    }
-
-
-
-
+   if (methodWhitelist.find(method => x.method?.includes(method) 
+      && !methodBlacklist.find(method => x.method?.includes(method)) )){
+       debug('onMessageReceived', x);
+       messageHandlers = messageHandlers.filter(hdr => {
+          try {
+            return !hdr(x);
+          }catch(e){
+              console.error('when handle messageHandlers', hdr, x);
+          }
+          return false;
+       })
+   }
+   
+   
+    
+   
 }
 
-function addMessageHandler(hdr) {
-    messageHandlers.push(hdr)
-    const removeFn = () => {
-        const index = messageHandlers.indexOf(hdr);
-        if (index > -1) {
-            messageHandlers.splice(index, 1);
-        }
-    }
-    return removeFn;
+function addMessageHandler(hdr){
+   messageHandlers.push(hdr)
+   const removeFn =  () => {
+      const index = messageHandlers.indexOf(hdr);
+      if (index > -1) { 
+        messageHandlers.splice(index, 1); 
+      }
+   }
+   return removeFn;
 }
 
 
 test.onMessageSent = (x) => {
-    if (methodWhitelist.find(method => x.method?.includes(method))
-        && !methodBlacklist.find(method => x.method?.includes(method))) {
-        debug('onMessageSent', x);
-    }
+   if (methodWhitelist.find(method => x.method?.includes(method))
+      && !methodBlacklist.find(method => x.method?.includes(method))){
+       debug('onMessageSent', x);
+   }
 }
 
 executionContexts = []
+let currentContextId = undefined;
 
 addMessageHandler((x) => {
-    (async () => {
-        if (x.method === 'Runtime.bindingCalled' && x.params?.name === bindingName) {
-            const { payload, executionContextId } = x.params;
-            let expressionOnFailedOuter;
-            try {
-                console.log('START', x)
-                const { method, params, expressionOnDone, expressionOnFailed } = JSON.parse(payload);
-                expressionOnFailedOuter = expressionOnFailed;
-                await sendMessage(method, params)
-                console.log('DONE', payload);
-                try {
-                    await evaluate(expressionOnDone || `console.log('${bindingName} done')`, { contextId: executionContextId })
-                } catch (e) {
-                    if (e.code === -32000) {
-                        console.log('context may be destroyed, IGNORE')
-                    } else {
-                        throw e
-                    }
-                }
-            } catch (err) {
-                console.error('ERR', err)
-                try {
-                    await evaluate(expressionOnFailedOuter || `console.error("when handling ${bindingName}","${err?.toString()}")`, { contextId: executionContextId })
-                } catch (e) {
-                    if (e.code === -32000) {
-                        console.log('context may be destroyed, IGNORE')
-                    } else {
-                        throw e
-                    }
-                }
-            }
-        }
-        else if (x.method === "Runtime.executionContextsCleared") {
-            setUpClient()
-            executionContexts = []
-        } else if (x.method === 'Runtime.executionContextCreated') {
-            executionContexts.push(x.params.context)
-        } else if (x.method === 'Runtime.executionContextDestroyed') {
-            executionContexts = executionContexts.filter(c => c.id !== x.params.executionContextId)
-        }
+    (async () =>{
+       if (x.method === 'Runtime.bindingCalled' && x.params?.name === bindingName){
+         const {payload, executionContextId} = x.params;
+           let expressionOnFailedOuter;
+           try {
+               console.log('START', x)
+               const {method, params, expressionOnDone, expressionOnFailed} = JSON.parse(payload);
+               expressionOnFailedOuter = expressionOnFailed;
+               await sendMessage(method, params)
+               console.log('DONE',payload);
+               try {
+                  await evaluate(expressionOnDone || `console.log('${bindingName} done')`, {contextId:executionContextId})
+               }catch(e){
+                  if (e.code === -32000){
+                     console.log('context may be destroyed, IGNORE')
+                  }else{
+                     throw e
+                  }
+               }
+           }catch(err){
+               console.error('ERR',err)
+               try {
+                    await evaluate(expressionOnFailedOuter ||`console.error("when handling ${bindingName}","${err?.toString()}")`, {contextId:executionContextId})
+               }catch(e){
+                  if (e.code === -32000){
+                     console.log('context may be destroyed, IGNORE')
+                  }else{
+                     throw e
+                  }
+               }
+             }
+       }
+       else if (x.method === "Runtime.executionContextsCleared"){
+          executionContexts = []
+       }else if (x.method === 'Runtime.executionContextCreated'){
+          executionContexts.push(x.params.context)
+       }else if (x.method === 'Runtime.executionContextDestroyed'){
+          executionContexts = executionContexts.filter(c=> c.id !== x.params.executionContextId)
+       }
     })();
-    return false
+   return false
 })
 
 
 
 
-sendMessage('Runtime.removeBinding', { name: bindingName });
+sendMessage('Runtime.removeBinding', {name: bindingName});
 
-sendMessage('Runtime.addBinding', { name: bindingName });
-
+sendMessage('Runtime.addBinding', {name: bindingName});
 
 
 setUpClient();
 
 
 
-/** star of helper functions*/
-
-const evaluateUntil = (expression, ignoreError = true) => {
-    return new Promise(async (res, rej) => {
-        setTimeout(() => rej('timeout while evaluateUntil'), 30 * 1000)
-        while (true) {
-            try {
-                const [{ result: { value } }] = await evaluate(expression);
-                if (value === true) {
-                    break;
-                }
-            } catch (e) {
-                if (!ignoreError) {
-                    break;
-                }
+/** start of helper functions*/
+const tryUntilTimeout = (tryOnce, time) => {
+   let done = false;
+   let result = null;
+   return Promise.race([
+      (async () => {
+         while (!done){
+            result = await tryOnce();
+            done = done || !!result
+            if (!done){
+               await new Promise(res => setTimeout(res, 500));
             }
-            await new Promise(res => setTimeout(res, 500));
-        }
-        res()
+         }
+         return result;
+      })(),
+      new Promise((_,rej) => setTimeout(() =>{
+         done = true;
+         rej('timedout');
+      }, time))
+   ])
+}
 
 
-    })
-
+const evaluateUntilContext = (expression) => {
+   return tryUntilTimeout(
+      (async () => {
+           for (let ec of executionContexts){
+               try {
+                  const [{result: {value}}] = await evaluate(expression, {contextId: ec.id});
+                  if (value === true){
+                     setUpClient(ec.id);
+                     currentContextId = ec.id;
+                     return ec.id;
+                  }
+               }catch(e){
+                  // do nothing
+               }
+                   
+            }
+         }
+      ), 30* 1000)
 }
 
 
 const fetch = (url) => {
-    return evaluate(`window.fetch('${url}')`);
+   return evaluate(`window.fetch('${url}')`);
 }
 
-const navigate = (url) => {
-
-    return new Promise(async (res, rej) => {
-        const [{ frameId, loaderId }] = await sendMessage('Page.navigate', { url, transitionType: 'reload' })
-        let done = false
-        const removeFn = addMessageHandler((x) => {
-            const { method, params } = x;
-            if (method === 'Page.frameNavigated' && params.frame?.id === frameId && params.frame?.loaderId === loaderId) {
-                done = true
-                res();
-                return true;
-            }
-        });
-        await new Promise(ress => setTimeout(ress, 10 * 1000));
-        if (!done) {
-            console.error('timedout when navigate', url);
-            removeFn();
-            rej();
-        }
-    })
-
+const navigate= async (url) => {
+   const [{frameId, loaderId}] =  await sendMessage('Page.navigate', {url, transitionType: 'reload'})
+   let done = false;
+   const removeFn = addMessageHandler((x) => {
+      const {method, params} = x;
+      if (method === 'Page.frameNavigated' && params.frame?.id === frameId && params.frame?.loaderId === loaderId){
+         done = true;
+         setUpClient();
+         return true; // remove this listener
+      }
+   });
+   return tryUntilTimeout(() => done, 30*1000)   
 }
 
